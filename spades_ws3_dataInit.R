@@ -113,14 +113,35 @@ plotFun <- function(sim) {
 
   ## Prepare demo defaults:
   git_submodule_add_in_SpaDES_module(GithubURL=P(sim)$GithubURL,
-                                     module.path=modulePath(sim),
+                                     module.path=modulePath(sim)[1],
                                      current.module.name=currentModule(sim))
 
   # Load demo default data via datalad:
-  datalad<-import("datalad.api")           # load datalad module into reticulate
-  this.module.path<-modulePath(sim)[grep(currentModule(sim), lapply(modulePath(sim), list.files))] # This is just modulePath, but adapted to be safe for multiple modulePaths. It just picks the directory that the current module is in
-  datalad.dir<-file.path(this.module.path,currentModule(sim),"cccandies_demo_input")   # The directory to put the datalad files
-  datalad$get(path = datalad.dir, recursive = TRUE)   # use reticulate to get the datalad files
+  #datalad<-import("datalad.api")           # load datalad module into reticulate
+  #this.module.path<-modulePath(sim)[grep(currentModule(sim), lapply(modulePath(sim), list.files))] # This is just modulePath, but adapted to be safe for multiple modulePaths. It just picks the directory that the current module is in
+  #browser()
+  #datalad.dir<-file.path(this.module.path,currentModule(sim),"cccandies_demo_input")   # The directory to put the datalad files
+  #datalad$get(path = datalad.dir, recursive = TRUE)   # use reticulate to get the datalad files
+
+  # Load demo default data via datalad:
+  datalad <- import("datalad.api")           # load datalad module into reticulate
+  Dataset <- datalad$Dataset                 # Get Dataset class
+  this.module.path <- modulePath(sim)[grep(currentModule(sim), lapply(modulePath(sim), list.files))]
+  datalad.dir <- file.path(this.module.path, currentModule(sim), "cccandies_demo_input")
+
+  # Check if dataset is already installed, if not install it
+  if (!dir.exists(datalad.dir) || !file.exists(file.path(datalad.dir, ".datalad"))) {
+    message("Installing datalad dataset from ", P(sim)$GithubURL)
+    # Install the dataset from the GitHub URL
+    invisible(datalad$install(path = datalad.dir, source = P(sim)$GithubURL))
+  } else {
+    message("Datalad dataset already exists at ", datalad.dir)
+    # Create Dataset instance from existing directory
+    ds <- Dataset(datalad.dir)
+    # Get the files
+    invisible(ds$get(recursive = TRUE))
+  }
+
 
   # Create softlinks between inputPath(sim) and the datalad directory:
   create_link_tree(
