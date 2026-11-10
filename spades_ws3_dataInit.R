@@ -39,6 +39,9 @@ defineModule(sim, list(
     defineParameter("merge.approach", "character", "mosaic", NA, NA, "Whether to use terra:merge (default) or terra:mosaic to combine multiple input rasters"),
     defineParameter("hdtPath", "character", "hdt", NA, NA, "Path to pickled hdt files"),
     defineParameter("hdtPrefix", "character", "hdt_", NA, NA, "HDT filename prefix"),
+    defineParameter("pythonPath", "character", NA, NA, NA,
+                    paste("Path to an existing Python interpreter to create the virtualenv from.",
+                          "NA (default) installs Python with reticulate::install_python().")),
     defineParameter(".plotInitialTime", "numeric", NA, NA, NA, "This describes the simulation time at which the first plot event should occur"),
     defineParameter(".plotInterval", "numeric", NA, NA, NA, "This describes the simulation time interval between plot events"),
     defineParameter(".saveInitialTime", "numeric", NA, NA, NA, "This describes the simulation time at which the first save event should occur"),
@@ -109,7 +112,8 @@ plotFun <- function(sim) {
 
   install_python_env(py_version= py_version,
                      py_packages= py_packages,
-                     venv= venv)
+                     venv= venv,
+                     python= P(sim)$pythonPath)
 
   ## Prepare demo defaults:
   git_submodule_add_in_SpaDES_module(GithubURL=P(sim)$GithubURL,
@@ -315,11 +319,14 @@ plotFun <- function(sim) {
 
 ## "Install Python Environment" function:
 # This installs pyton of a given version, installs packages, and creates a virtual environment
-install_python_env <- function(py_version, py_packages, venv) {
-  reticulate::install_python(version = py_version)
+install_python_env <- function(py_version, py_packages, venv, python = NA) {
+  usePython <- !is.null(python) && !is.na(python)
+  if (!usePython) reticulate::install_python(version = py_version)
 
   if (reticulate::virtualenv_exists(venv)) {
     reticulate::py_install(py_packages)
+  } else if (usePython) {
+    reticulate::virtualenv_create(venv, python = python, packages = py_packages)
   } else {
     reticulate::virtualenv_create(venv, packages = py_packages)
   }
