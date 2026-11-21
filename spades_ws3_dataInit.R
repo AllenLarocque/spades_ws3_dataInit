@@ -279,7 +279,10 @@ plotFun <- function(sim) {
     # 1. Download from BC Data Catalogue using bcdata
     if (!file.exists(local_gpkg)) {
       message("Downloading TSA polygons from BC Data Catalogue ...")
-      tsa_sf <- bcdata::bcdc_get_data(tsa_id)
+      # The catalogue record (tsa_id) no longer lists a WFS resource that bcdata can download
+      # ("There are no resources that bcdata can download from this record"); query the
+      # layer it describes by name instead.
+      tsa_sf <- bcdata::bcdc_query_geodata("WHSE_ADMIN_BOUNDARIES.FADM_TSA_SV") |> bcdata::collect()
       sf::st_write(tsa_sf, local_gpkg, delete_dsn = TRUE)
     }
 
