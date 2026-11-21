@@ -136,11 +136,11 @@ plotFun <- function(sim) {
     invisible(datalad$install(path = datalad.dir, source = P(sim)$GithubURL))
   } else {
     message("Datalad dataset already exists at ", datalad.dir)
-    # Create Dataset instance from existing directory
-    ds <- Dataset(datalad.dir)
-    # Get the files
-    invisible(ds$get(recursive = TRUE))
   }
+  # Create Dataset instance from existing directory
+  ds <- Dataset(datalad.dir)
+  # Get the files (install() alone only fetches the git tree, not the annexed content)
+  invisible(ds$get(recursive = TRUE))
 
 
   # Create softlinks between inputPath(sim) and the datalad directory:
