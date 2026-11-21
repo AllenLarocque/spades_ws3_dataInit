@@ -241,16 +241,9 @@ plotFun <- function(sim) {
     #   sim$landscape <- rs.list[[1]]
     # }
 
-    if (length(rs.list) > 1) {
-      r_merged <- if (P(sim)$merge.approach == "mosaic") {
-        do.call(terra::mosaic, c(rs.list, fun = "mean"))  # Slower, handles overlaps
-      } else {
-        do.call(terra::merge, rs.list)                     # Faster, no overlaps
-      }
-      sim$landscape <- r_merged
-    } else {
-      sim$landscape <- rs.list[[1]]
-    }
+    # One TSA: its stack as is. Several: category labels as numbers, then mosaic/merge
+    # (combineTsaRasters(); combining the categorical layers directly mixed up the TSAs' categories)
+    sim$landscape <- combineTsaRasters(rs.list, P(sim)$merge.approach)
 
     # Assign standard layer names
     names(sim$landscape) <- c("fmuid", "thlb", "au", "blockid", "age")
@@ -315,6 +308,61 @@ plotFun <- function(sim) {
 
 #####################
 # Functions:
+
+## Combining several TSA (basename) inventories into one landscape:
+# recompile.rs() builds thlb and au with terra::subst() from the HDT's character values, which makes
+# them categorical, each TSA with its own category table. terra::mosaic()/merge() combine the
+# category *indices*: mosaic(fun = "mean") averaged them, and merge() keeps the first raster's table
+# for all, so other TSAs' thlb and au were wrong. Convert the labels to numbers first.
+
+#' Layers of a SpatRaster with categorical layers replaced by their (numeric) labels.
+labelsToNumeric <- function(r) {
+  out <- lapply(seq_len(terra::nlyr(r)), function(i) {
+    x <- r[[i]]
+    if (!terra::is.factor(x)) return(x)
+    lv <- terra::cats(x)[[1]]
+    lab <- suppressWarnings(as.numeric(as.character(lv[[terra::activeCat(x) + 1]])))
+    y <- terra::rast(x)                                  # same grid, no values, not categorical
+    terra::values(y) <- lab[match(terra::values(x)[, 1], lv[[1]])]   # index -> label
+    y
+  })
+  out <- terra::rast(out)
+  names(out) <- names(r)
+  out
+}
+
+#' Number of cells that are forest (non-NA age, last layer) in more than one TSA's inventory.
+tsaOverlapCount <- function(rsList) {
+  if (length(rsList) < 2) return(0L)
+  n <- 0L
+  for (i in seq_len(length(rsList) - 1)) for (j in (i + 1):length(rsList)) {
+    e <- terra::intersect(terra::ext(rsList[[i]]), terra::ext(rsList[[j]]))
+    if (is.null(e)) next
+    a <- terra::crop(rsList[[i]][[terra::nlyr(rsList[[i]])]], e)
+    b <- terra::crop(rsList[[j]][[terra::nlyr(rsList[[j]])]], e)
+    if (!terra::compareGeom(a, b, stopOnError = FALSE)) b <- terra::resample(b, a, method = "near")
+    n <- n + as.integer(sum(!is.na(terra::values(a)[, 1]) & !is.na(terra::values(b)[, 1])))
+  }
+  n
+}
+
+#' One landscape from the TSAs' stacks (fmuid, thlb, au, blockid, age). A single TSA is returned as
+#' is; several are combined with terra::mosaic(fun = "mean") or terra::merge() after their
+#' categorical layers are converted to labels. Cells in more than one TSA's inventory are reported:
+#' mosaic averages them, merge keeps the first TSA's values.
+combineTsaRasters <- function(rsList, approach = "mosaic") {
+  if (length(rsList) == 1) return(rsList[[1]])
+  nOver <- tsaOverlapCount(rsList)
+  if (nOver > 0)
+    warning(nOver, " cell(s) are forest in more than one TSA inventory (stands listed in both TSAs); ",
+            if (approach == "mosaic") "mosaic averages their values." else "merge keeps the first TSA's values.",
+            call. = FALSE)
+  rsList <- lapply(rsList, labelsToNumeric)
+  out <- if (approach == "mosaic") do.call(terra::mosaic, c(unname(rsList), fun = "mean"))
+         else do.call(terra::merge, unname(rsList))
+  names(out) <- names(rsList[[1]])
+  out
+}
 
 ## "Install Python Environment" function:
 # This installs pyton of a given version, installs packages, and creates a virtual environment
