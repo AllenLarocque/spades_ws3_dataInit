@@ -37,6 +37,14 @@ defineModule(sim, list(
     defineParameter("base.year", 'numeric', 2015, NA, NA, "base year of forest inventory data"),
     defineParameter("tif.path", "character", "tif", NA, NA, "Path to TIF raster inventory files"),
     defineParameter("merge.approach", "character", "mosaic", NA, NA, "Whether to use terra:merge (default) or terra:mosaic to combine multiple input rasters"),
+    defineParameter("resolveTsaOverlaps", "logical", FALSE, NA, NA,
+                    paste("With several basenames: keep each stand that is listed in more than one TSA's",
+                          "inventory in one TSA only. The FRESH data selected each TSA's VRI polygons by",
+                          "intersection with a simplified TSA boundary, so stands near shared borders are in",
+                          "both. Each such cell goes to the TSA whose (BC FADM_TSA) boundary holds its centre,",
+                          "or the first-listed TSA, and is removed from the other TSA's inventory rasters in",
+                          "inputPath (links into the datalad data are replaced by edited copies).",
+                          "FALSE (default): inventories are used as they are.")),
     defineParameter("hdtPath", "character", "hdt", NA, NA, "Path to pickled hdt files"),
     defineParameter("hdtPrefix", "character", "hdt_", NA, NA, "HDT filename prefix"),
     defineParameter("pythonPath", "character", NA, NA, NA,
@@ -180,6 +188,15 @@ plotFun <- function(sim) {
   # There is one inventory raster per 'basename' (generally TSA). We combine these into a single raster.
   # These define our 'landscape' raster.
   if (!SpaDES.core::suppliedElsewhere("landscape", sim)) {
+
+    # Stands listed in more than one TSA: keep each in one TSA only (see parameter resolveTsaOverlaps)
+    if (isTRUE(P(sim)$resolveTsaOverlaps) && length(P(sim)$basenames) > 1) {
+      bnd <- terra::vect(tsaBoundaryFile(asPath(getOption("reproducible.destinationPath", dataPath(sim)), 1)))
+      bnd$charTSA <- paste0("tsa", bnd$TSA_NUMBER)
+      nDropped <- resolveTsaOverlaps(file.path(inputPath(sim), P(sim)$tif.path), P(sim)$basenames, bnd)
+      message(currentModule(sim), ": cells removed from a TSA because another TSA holds them: ",
+              paste(names(nDropped), nDropped, sep = " ", collapse = ", "))
+    }
 
     # Where are the inventory .tifs?
     # Build full paths to all inventory rasters
@@ -449,3 +466,85 @@ create_link_tree <- function(source_dir, target_dir) {
 }
 
 
+
+## Stands listed in more than one TSA (parameter resolveTsaOverlaps):
+
+#' Local copy of the BC Timber Supply Area boundaries (FADM_TSA), downloaded with bcdata if missing.
+#' The same file as the studyArea code uses (tsa_bcdata.gpkg in dPath).
+tsaBoundaryFile <- function(dPath) {
+  local_gpkg <- file.path(dPath, "tsa_bcdata.gpkg")
+  if (!file.exists(local_gpkg)) {
+    message("Downloading TSA polygons from BC Data Catalogue ...")
+    tsa_sf <- bcdata::bcdc_query_geodata("WHSE_ADMIN_BOUNDARIES.FADM_TSA_SV") |> bcdata::collect()
+    sf::st_write(tsa_sf, local_gpkg, delete_dsn = TRUE)
+  }
+  local_gpkg
+}
+
+#' For each TSA, the cells (of its own inventory raster) to remove because another TSA keeps them.
+#'
+#' A cell is shared when it has a value (band 1) in two TSAs' inventories. It stays with the TSA
+#' whose boundary (`boundaries$charTSA`) contains the cell centre; if neither or both do, with the
+#' TSA listed first.
+#' @param rasters Named list (basenames, in order) of inventory SpatRasters.
+#' @param boundaries SpatVector of TSA polygons with a charTSA column (e.g. "tsa41").
+#' @return Named list of integer cell numbers per basename.
+tsaOverlapDrops <- function(rasters, boundaries) {
+  bn <- names(rasters)
+  drops <- stats::setNames(rep(list(integer(0)), length(bn)), bn)
+  if (length(bn) < 2) return(drops)
+  boundaries <- terra::project(boundaries, terra::crs(rasters[[1]]))
+  for (i in seq_len(length(bn) - 1)) for (j in (i + 1):length(bn)) {
+    e <- terra::intersect(terra::ext(rasters[[i]]), terra::ext(rasters[[j]]))
+    if (is.null(e)) next
+    a <- terra::crop(rasters[[i]][[1]], e)
+    b <- terra::crop(rasters[[j]][[1]], e)
+    if (!terra::compareGeom(a, b, stopOnError = FALSE)) b <- terra::resample(b, a, method = "near")
+    both <- which(!is.na(terra::values(a)[, 1]) & !is.na(terra::values(b)[, 1]))
+    if (!length(both)) next
+    xy <- terra::xyFromCell(a, both)
+    pts <- terra::vect(xy, crs = terra::crs(a))
+    inside <- function(name) {
+      poly <- boundaries[boundaries$charTSA == name]
+      if (!nrow(poly)) return(rep(FALSE, length(both)))
+      rowSums(terra::relate(pts, poly, "intersects")) > 0
+    }
+    inI <- inside(bn[i]); inJ <- inside(bn[j])
+    toJ <- inJ & !inI                                   # otherwise the first-listed TSA keeps it
+    drops[[bn[i]]] <- c(drops[[bn[i]]], terra::cellFromXY(rasters[[i]], xy[toJ, , drop = FALSE]))
+    drops[[bn[j]]] <- c(drops[[bn[j]]], terra::cellFromXY(rasters[[j]], xy[!toJ, , drop = FALSE]))
+  }
+  lapply(drops, function(d) sort(unique(as.integer(d))))
+}
+
+#' Set cells to NA in every band of an inventory raster, writing a real file in place of the path.
+#' A path that is a link (e.g. into the datalad data) is replaced by an edited copy; its target is
+#' never written.
+dropInventoryCells <- function(file, cells) {
+  r <- terra::rast(file)
+  v <- terra::values(r)
+  v[cells, ] <- NA
+  out <- terra::rast(r)
+  terra::values(out) <- v
+  names(out) <- names(r)
+  tmp <- tempfile(tmpdir = dirname(file), fileext = ".tif")
+  terra::writeRaster(out, tmp, datatype = terra::datatype(r)[1])
+  unlink(file)                                          # removes a link, not its target
+  file.rename(tmp, file)
+  invisible(file)
+}
+
+#' Remove shared cells from the TSAs that do not keep them, in every inventory_*.tif of the TSA.
+#' @param tifDir Folder with one sub-folder per basename holding inventory_init.tif (and possibly
+#'   inventory_<year>.tif from earlier runs, which get the same edit).
+#' @return Named integer: cells removed per basename.
+resolveTsaOverlaps <- function(tifDir, basenames, boundaries) {
+  bn <- unlist(basenames)
+  rasters <- stats::setNames(lapply(bn, function(b) terra::rast(file.path(tifDir, b, "inventory_init.tif"))), bn)
+  drops <- tsaOverlapDrops(rasters, boundaries)
+  for (b in bn) if (length(drops[[b]])) {
+    for (f in list.files(file.path(tifDir, b), pattern = "^inventory_.*\\.tif$", full.names = TRUE))
+      dropInventoryCells(f, drops[[b]])
+  }
+  vapply(drops, length, integer(1))
+}
